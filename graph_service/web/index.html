@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>图数据加工服务 · 三角事实与聚集指标</title>
+<style>
+  :root {
+    --bg:#0f1420; --panel:#171e2e; --panel2:#1d2740; --line:#2a3856;
+    --text:#e6ebf5; --muted:#8ea0bf; --accent:#5b9dff; --ok:#37c98a;
+    --warn:#f0b455; --bad:#f26d7d; --chip:#243352;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.55 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+  header { padding:16px 24px; border-bottom:1px solid var(--line);
+    display:flex; align-items:center; gap:16px; flex-wrap:wrap; background:var(--panel); }
+  header h1 { font-size:17px; margin:0; font-weight:650; }
+  header .sub { color:var(--muted); font-size:12px; }
+  main { display:grid; grid-template-columns:340px 1fr; gap:16px; padding:16px 24px; }
+  @media (max-width:1080px){ main{grid-template-columns:1fr;} }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+    padding:14px 16px; margin-bottom:16px; }
+  .card h2 { font-size:13px; margin:0 0 10px; color:var(--accent);
+    text-transform:uppercase; letter-spacing:.06em; }
+  label { display:block; font-size:12px; color:var(--muted); margin:8px 0 3px; }
+  input, select, textarea { width:100%; background:var(--panel2); color:var(--text);
+    border:1px solid var(--line); border-radius:7px; padding:7px 9px; font-size:13px; }
+  textarea { font-family:ui-monospace,Menlo,Consolas,monospace; min-height:150px; }
+  button { background:var(--accent); color:#0b1220; border:0; border-radius:7px;
+    padding:7px 13px; font-weight:600; cursor:pointer; margin:6px 6px 0 0; font-size:13px; }
+  button.ghost { background:var(--chip); color:var(--text); }
+  button.warn { background:var(--warn); color:#241a06; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line);
+    vertical-align:top; }
+  th { color:var(--muted); font-weight:600; position:sticky; top:0; background:var(--panel); }
+  tr:hover td { background:#1b2540; }
+  .chip { display:inline-block; background:var(--chip); border-radius:20px;
+    padding:1px 9px; margin:1px 3px 1px 0; font-size:11.5px; }
+  .chip.grp { background:#2c3f6b; }
+  .chip.cross { background:#5a3a44; color:#ffc6cf; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); } .warn{ color:var(--warn); }
+  .muted { color:var(--muted); }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  @media (max-width:900px){ .grid2{grid-template-columns:1fr;} }
+  pre { background:#0c111d; border:1px solid var(--line); border-radius:8px;
+    padding:10px; overflow:auto; max-height:340px; font-size:12px; margin:6px 0; }
+  .tabs { display:flex; gap:6px; margin-bottom:10px; flex-wrap:wrap; }
+  .tabs button { margin:0; }
+  .tabs button.active { background:var(--accent); }
+  .stat { display:inline-block; background:var(--panel2); border:1px solid var(--line);
+    border-radius:8px; padding:8px 12px; margin:0 8px 8px 0; min-width:96px; }
+  .stat b { font-size:18px; display:block; }
+  .stat span { font-size:11.5px; color:var(--muted); }
+  #toast { position:fixed; right:20px; bottom:20px; max-width:420px; z-index:50; }
+  #toast .msg { background:var(--panel2); border:1px solid var(--line); border-left:4px solid var(--accent);
+    border-radius:8px; padding:10px 14px; margin-top:8px; font-size:13px; }
+  #toast .msg.bad { border-left-color:var(--bad); }
+  #toast .msg.ok  { border-left-color:var(--ok); }
+  .rowline { display:flex; gap:8px; align-items:center; }
+  .rowline input { margin:0; }
+  .small { font-size:11.5px; }
+  .link { color:var(--accent); cursor:pointer; text-decoration:underline; }
+  details { margin-top:8px; }
+  summary { cursor:pointer; color:var(--muted); font-size:12.5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>图数据加工服务</h1>
+  <span class="sub">多来源边 · 批次化增量三角 · 定向邻接/分区交集 · 群组聚集指标</span>
+  <span style="flex:1"></span>
+  <select id="sampleSel" style="width:200px"></select>
+  <button onclick="loadSample(true)">装载样例</button>
+  <button class="ghost" onclick="loadSample(false)">仅首批（不跑演示批次）</button>
+  <button class="ghost" onclick="rebuild()">全量重建</button>
+  <button class="ghost" onclick="refresh()">刷新</button>
+</header>
+
+<main>
+  <!-- 左栏：操作区 -->
+  <section>
+    <div class="card">
+      <h2>① 编辑边来源（一个批次）</h2>
+      <p class="muted small">同一批次内可混合新增/撤回多条相邻边；正式查询只看整批净结果，
+        批内临时三角不会落库。重复来源不会产生新边或新三角。</p>
+      <div id="changeRows"></div>
+      <div class="rowline" style="margin-top:8px">
+        <button class="ghost" onclick="addRow()">+ 一行变更</button>
+        <button class="ghost" onclick="fillDemo()">填入当前样例演示批次</button>
+      </div>
+      <label>批次备注</label>
+      <input id="note" placeholder="可选">
+      <div style="margin-top:8px">
+        <button onclick="submitBatch('batch')">提交批次</button>
+        <button class="ghost" onclick="submitBatch('compare')">全量 vs 增量对比（不落库）</button>
+        <button class="ghost" onclick="submitBatch('simulate')">逐条顺序模拟（看临时三角）</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>② 节点改群组</h2>
+      <p class="muted small">迁移会重判该节点相关三角的同组/跨组归属并重建两个群组的指标，
+        不复制旧计数。</p>
+      <div class="rowline">
+        <input id="mvNode" placeholder="节点 id">
+        <input id="mvGroup" placeholder="新群组">
+        <button onclick="moveNode()">迁移</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>③ 查询</h2>
+      <label>三角 tid（留空显示全部，点击右侧三角可带过）</label>
+      <input id="qTid" placeholder='如 ["a","b","c"]'>
+      <button onclick="queryTriangle()">查三角支持记录</button>
+      <label style="margin-top:8px">边 u / v</label>
+      <div class="rowline">
+        <input id="qEu" placeholder="u"><input id="qEv" placeholder="v">
+        <button onclick="queryEdge()">查边贡献</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>④ 守恒校验</h2>
+      <button onclick="verify()">运行全量守恒核对</button>
+      <div id="verifyBox" class="small"></div>
+    </div>
+  </section>
+
+  <!-- 右栏：结果区 -->
+  <section>
+    <div class="card">
+      <h2>总览</h2>
+      <div id="stats"></div>
+      <div class="tabs">
+        <button class="active" data-tab="tri" onclick="switchTab('tri')">三角事实</button>
+        <button data-tab="edge" onclick="switchTab('edge')">边与来源 / 边贡献</button>
+        <button data-tab="node" onclick="switchTab('node')">节点聚集指标</button>
+        <button data-tab="grp" onclick="switchTab('grp')">群组指标</button>
+        <button data-tab="batch" onclick="switchTab('batch')">批次日志</button>
+        <button data-tab="out" onclick="switchTab('out')">操作输出</button>
+      </div>
+      <div id="tab-tri"></div>
+      <div id="tab-edge" hidden></div>
+      <div id="tab-node" hidden></div>
+      <div id="tab-grp" hidden></div>
+      <div id="tab-batch" hidden></div>
+      <div id="tab-out" hidden><pre id="outBox">操作结果将显示在这里。</pre></div>
+    </div>
+
+    <div class="card" id="detailCard" hidden>
+      <h2>支持记录 / 对比详情</h2>
+      <div id="detailBox"></div>
+    </div>
+  </section>
+</main>
+
+<div id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let STATE = null;
+let currentTab = "tri";
+
+function toast(msg, kind="") {
+  const box = $("toast");
+  const d = document.createElement("div");
+  d.className = "msg " + kind;
+  d.textContent = msg;
+  box.appendChild(d);
+  setTimeout(() => d.remove(), 4200);
+}
+function out(obj) {
+  $("outBox").textContent = typeof obj === "string" ? obj : JSON.stringify(obj, null, 2);
+  switchTab("out");
+}
+async function api(path, opts={}) {
+  const res = await fetch(path, {
+    headers: {"Content-Type": "application/json"}, ...opts,
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+  return data;
+}
+
+// ---------- 变更行 ----------
+function addRow(prefill={}) {
+  const wrap = $("changeRows");
+  const div = document.createElement("div");
+  div.className = "rowline";
+  div.style.marginBottom = "6px";
+  div.innerHTML = `
+    <input class="cu" placeholder="u" value="${prefill.u||""}">
+    <input class="cv" placeholder="v" value="${prefill.v||""}">
+    <input class="cs" placeholder="来源 source" value="${prefill.source||""}">
+    <select class="ca">
+      <option value="add_source">add_source</option>
+      <option value="withdraw_source">withdraw_source</option>
+    </select>
+    <button class="ghost" onclick="this.parentElement.remove()">×</button>`;
+  div.querySelector(".ca").value = prefill.action || "add_source";
+  wrap.appendChild(div);
+}
+function readRows() {
+  return [...document.querySelectorAll("#changeRows > div")].map(d => ({
+    u: d.querySelector(".cu").value.trim(),
+    v: d.querySelector(".cv").value.trim(),
+    source: d.querySelector(".cs").value.trim(),
+    action: d.querySelector(".ca").value,
+  })).filter(r => r.u && r.v && r.source);
+}
+function fillDemo() {
+  const name = $("sampleSel").value;
+  const sample = SAMPLE_CACHE[name];
+  $("changeRows").innerHTML = "";
+  (sample?.batch?.changes || []).forEach(addRow);
+  $("note").value = sample?.batch?.note || "";
+}
+
+// ---------- 样例 ----------
+let SAMPLE_CACHE = {};
+async function loadSamplesMeta() {
+  const data = await api("/api/samples");
+  SAMPLE_CACHE = data.details;
+  $("sampleSel").innerHTML = data.samples.map(n => `<option>${n}</option>`).join("");
+  fillDemo();
+}
+async function loadSample(useDemo) {
+  try {
+    const r = await api("/api/load-sample", {method:"POST",
+      body: JSON.stringify({sample: $("sampleSel").value, apply_demo_batch: useDemo})});
+    toast(`样例 ${r.sample} 装载完成，守恒校验：${r.conservation.ok ? "通过" : "失败"}`,
+      r.conservation.ok ? "ok" : "bad");
+    fillDemo();
+    await refresh();
+    out(r);
+  } catch (e) { toast(e.message, "bad"); }
+}
+
+// ---------- 批次操作 ----------
+async function submitBatch(kind) {
+  const changes = readRows();
+  if (!changes.length) return toast("请至少填写一行有效变更", "bad");
+  const note = $("note").value;
+  try {
+    if (kind === "batch") {
+      const r = await api("/api/batch", {method:"POST",
+        body: JSON.stringify({changes, note})});
+      toast(`批次已提交（${r.mode}），守恒：${r.conservation.ok ? "通过":"失败"}`,
+        r.conservation.ok ? "ok" : "bad");
+      out(r);
+    } else if (kind === "compare") {
+      const r = await api("/api/compare", {method:"POST",
+        body: JSON.stringify({changes})});
+      renderCompare(r);
+      return;
+    } else {
+      const r = await api("/api/simulate", {method:"POST",
+        body: JSON.stringify({changes})});
+      renderSimulation(r);
+      return;
+    }
+    await refresh();
+  } catch (e) { toast(e.message, "bad"); }
+}
+async function moveNode() {
+  const node_id = $("mvNode").value.trim(), group = $("mvGroup").value.trim();
+  if (!node_id || !group) return toast("节点与新群组必填", "bad");
+  try {
+    const r = await api("/api/move-node", {method:"POST",
+      body: JSON.stringify({node_id, group})});
+    toast(r.changed ? `已迁移，重判三角 ${r.retriangulated} 个` : "群组未变化", "ok");
+    out(r); await refresh();
+  } catch (e) { toast(e.message, "bad"); }
+}
+async function rebuild() {
+  try {
+    const r = await api("/api/rebuild", {method:"POST",
+      body: JSON.stringify({note: "web manual rebuild"})});
+    toast(`全量重建完成（${r.triangle_count} 个三角），守恒：${r.conservation.ok?"通过":"失败"}`,
+      r.conservation.ok?"ok":"bad");
+    out(r); await refresh();
+  } catch (e) { toast(e.message, "bad"); }
+}
+async function verify() {
+  const r = await api("/api/verify");
+  $("verifyBox").innerHTML =
+    `<div class="${r.ok?"ok":"bad"}" style="font-weight:650;margin:6px 0">
+       总体：${r.ok ? "全部守恒 ✓" : "存在不一致 ✗"}</div>` +
+    r.checks.map(c => `<div class="${c.ok?"ok":"bad"}">${c.ok?"✓":"✗"} ${c.check}
+      ${c.ok?"":' <span class="muted">'+JSON.stringify(c.detail)+'</span>'}</div>`).join("") +
+    `<div class="muted" style="margin-top:6px">${JSON.stringify(r.counts)}</div>`;
+}
+
+// ---------- 查询 ----------
+async function queryTriangle() {
+  let tid = $("qTid").value.trim();
+  if (!tid) return toast("请输入三角 tid");
+  try {
+    const r = await api("/api/triangle/" + encodeURIComponent(tid));
+    renderTriangleDetail(r);
+  } catch (e) { toast(e.message, "bad"); }
+}
+async function queryEdge() {
+  const u = $("qEu").value.trim(), v = $("qEv").value.trim();
+  if (!u || !v) return toast("u/v 必填", "bad");
+  try {
+    const r = await api("/api/edge/" + encodeURIComponent(u) + "/" + encodeURIComponent(v));
+    $("detailCard").hidden = false;
+    $("detailBox").innerHTML =
+      `<h3>边 ${r.edge.join(" — ")} 的贡献</h3>
+       <p>当前有效来源：${r.sources.map(s=>`<span class="chip">${s}</span>`).join("")}</p>
+       <p>参与三角数（边贡献）：<b>${r.metric?.tri_support ?? 0}</b>，
+        其中同组：${r.metric?.tri_in_grp ?? 0}</p>
+       <table><thead><tr><th>三角 tid</th><th>归属</th></tr></thead><tbody>
+       ${r.triangles.map(t=>`<tr><td class="link" onclick='showTid(${JSON.stringify(t.tid)})'>${t.tid}</td>
+         <td>${grpChip(t.group)}</td></tr>`).join("") ||
+         '<tr><td colspan="2" class="muted">不参与任何三角</td></tr>'}</tbody></table>`;
+  } catch (e) { toast(e.message, "bad"); }
+}
+function showTid(tid) { $("qTid").value = tid; queryTriangle(); }
+
+function renderTriangleDetail(r) {
+  $("detailCard").hidden = false;
+  $("detailBox").innerHTML =
+    `<h3>三角 ${r.tid} ${grpChip(r.group)}</h3>
+     <p class="muted small">创建批次：${r.created_batch || "—"}</p>
+     <table><thead><tr><th>支持边</th><th>提交时来源快照</th><th>当前有效来源</th></tr></thead><tbody>
+     ${r.supports.map(s => `<tr>
+       <td>${s.edge.join(" — ")}</td>
+       <td>${s.sources_at_commit.map(x=>`<span class="chip">${x}</span>`).join("")}</td>
+       <td>${s.live_sources.map(x=>`<span class="chip">${x}</span>`).join("") ||
+            '<span class="bad">无（边已删除）</span>'}</td></tr>`).join("")}
+     </tbody></table>
+     <details><summary>原始 JSON</summary><pre>${JSON.stringify(r, null, 2)}</pre></details>`;
+}
+
+function renderCompare(r) {
+  const inc = r.incremental, full = r.full_rebuild;
+  $("detailCard").hidden = false;
+  const incRows = inc.mode === "incremental" ? `
+      <p>模式：<b class="ok">定向增量</b>，候选三角 旧 ${inc.candidates_old} / 新 ${inc.candidates_new}</p>
+      <p>新增：${(inc.triangle_delta.added||[]).map(t=>`<span class="chip">${t.join(",")}</span>`).join("")||'<span class="muted">无</span>'}</p>
+      <p>删除：${(inc.triangle_delta.removed||[]).map(t=>`<span class="chip">${t.join(",")}</span>`).join("")||'<span class="muted">无</span>'}</p>`
+    : `<p>模式：<b class="warn">预算回退 → 全量重建</b>（增量工作单元超预算，结果仍正确）</p>`;
+  $("detailBox").innerHTML = `<h3>全量 vs 增量 并排对比
+      <span class="${r.equal?"ok":"bad"}">${r.equal?"结果一致 ✓":"结果不一致 ✗"}</span></h3>
+    <div class="grid2">
+      <div><h4 class="muted">增量预测（不落库）</h4>${incRows}</div>
+      <div><h4 class="muted">全量重建预测（不落库）</h4>
+        <p>节点 ${full.node_count} · 边 ${full.edge_count} · 三角 ${full.triangles.length}</p>
+        <pre>${JSON.stringify(full.triangles, null, 1)}</pre></div>
+    </div>
+    <details><summary>原始 JSON</summary><pre>${JSON.stringify(r, null, 2)}</pre></details>`;
+}
+function renderSimulation(r) {
+  $("detailCard").hidden = false;
+  const allEver = new Set();
+  $("detailBox").innerHTML = `<h3>逐条顺序模拟（仅演示，不落库）</h3>
+    <p class="warn small">注意：顺序应用会产生正式批次中不存在的临时三角；
+      正式提交按整批净结果计算，临时三角不会出现。</p>
+    <table><thead><tr><th>#</th><th>变更</th><th>该步三角集合</th></tr></thead><tbody>
+    ${r.steps.map(s => {
+      s.triangles.forEach(t => allEver.add(t.join(",")));
+      return `<tr><td>${s.seq}</td><td>${s.change.action}<br>
+        <span class="muted">${s.change.u}-${s.change.v} / ${s.change.source}</span></td>
+        <td>${s.triangles.map(t=>`<span class="chip">${t.join(",")}</span>`).join("")||
+          '<span class="muted">∅</span>'} <span class="muted">(${s.triangle_count})</span></td></tr>`;
+    }).join("")}</tbody></table>
+    <details><summary>原始 JSON</summary><pre>${JSON.stringify(r, null, 2)}</pre></details>`;
+}
+
+// ---------- 总览渲染 ----------
+function grpChip(g) {
+  return g === "*cross-group*"
+    ? '<span class="chip cross">跨组（不计入群组指标）</span>'
+    : `<span class="chip grp">${g}</span>`;
+}
+function switchTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll(".tabs button").forEach(b =>
+    b.classList.toggle("active", b.dataset.tab === tab));
+  ["tri","edge","node","grp","batch","out"].forEach(t =>
+    $(`tab-${t}`).hidden = (t !== tab));
+}
+function renderState(s) {
+  STATE = s;
+  $("stats").innerHTML = [
+    ["节点", s.nodes.length], ["业务边", s.edges.length],
+    ["三角", s.triangles.length], ["来源条数", s.conservation.sources],
+  ].map(([k,v]) => `<span class="stat"><b>${v}</b><span>${k}</span></span>`).join("");
+
+  $("tab-tri").innerHTML = `<table><thead><tr><th>tid（点开看支持记录）</th><th>归属</th><th>创建批次</th></tr></thead><tbody>
+    ${s.triangles.map(t => `<tr><td class="link" onclick='showTid(${JSON.stringify(t.tid)})'>${t.tid}</td>
+      <td>${grpChip(t.group)}</td><td class="muted">${t.created_batch||""}</td></tr>`).join("")}
+    </tbody></table>`;
+
+  $("tab-edge").innerHTML = `<table><thead><tr><th>边</th><th>有效来源</th><th>三角贡献</th><th>同组贡献</th></tr></thead><tbody>
+    ${s.edges.map(e => {
+      const m = s.edge_metrics.find(x => x.u===e.u && x.v===e.v) || {};
+      return `<tr><td>${e.u} — ${e.v}</td>
+      <td>${e.sources.map(x=>`<span class="chip">${x}</span>`).join("")}</td>
+      <td><b>${m.tri_support??0}</b></td><td>${m.tri_in_grp??0}</td></tr>`;
+    }).join("")}</tbody></table>`;
+
+  $("tab-node").innerHTML = `<table><thead><tr><th>节点</th><th>群组</th><th>度</th>
+      <th>三角数</th><th>组内三角</th><th>聚集系数</th></tr></thead><tbody>
+    ${s.node_metrics.map(m => `<tr><td>${m.node_id}</td><td>${grpChip(m.grp)}</td>
+      <td>${m.degree}</td><td>${m.tri_count}</td><td>${m.tri_count_in_grp}</td>
+      <td>${m.clustering.toFixed(3)}</td></tr>`).join("")}</tbody></table>`;
+
+  $("tab-grp").innerHTML = `<table><thead><tr><th>群组</th><th>节点</th><th>组内边</th>
+      <th>闭合三角</th><th>边贡献之和（=3×三角）</th><th>守恒</th></tr></thead><tbody>
+    ${s.group_metrics.map(g => `<tr><td>${g.grp}</td><td>${g.node_count}</td>
+      <td>${g.edge_count}</td><td><b>${g.triangle_count}</b></td>
+      <td>${g.edge_sum}</td>
+      <td class="${g.edge_sum===3*g.triangle_count?"ok":"bad"}">
+        ${g.edge_sum===3*g.triangle_count?"✓":"✗"}</td></tr>`).join("")}</tbody></table>`;
+}
+async function loadBatches() {
+  const r = await api("/api/batches?limit=100");
+  $("tab-batch").innerHTML = r.batches.map(b => `
+    <details><summary><b>${b.kind}</b> ${b.batch_id}
+      <span class="muted">${b.created_at}${b.note? " · " + b.note : ""}</span></summary>
+      <table><thead><tr><th>#</th><th>边</th><th>来源</th><th>动作</th><th>边出生</th><th>边死亡</th></tr></thead><tbody>
+      ${b.changes.map(c => `<tr><td>${c.seq}</td><td>${c.u}—${c.v}</td><td>${c.source}</td>
+        <td>${c.action}</td><td>${c.edge_born?"是":""}</td><td>${c.edge_died?"是":""}</td></tr>`).join("")}
+      </tbody></table></details>`).join("") || '<p class="muted">暂无批次</p>';
+}
+async function refresh() {
+  const s = await api("/api/state");
+  renderState(s);
+  await loadBatches();
+}
+
+// ---------- 启动 ----------
+addRow();
+loadSamplesMeta().then(refresh).catch(e => toast(e.message, "bad"));
+</script>
+</body>
+</html>

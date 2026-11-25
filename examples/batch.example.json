@@ -1,0 +1,7 @@
+{
+  "note": "示例批次：同批混合新增与撤回，可用于 python3 -I run.py batch --file ...",
+  "changes": [
+    {"u": "a", "v": "b", "source": "feed-new", "action": "add_source"},
+    {"u": "a", "v": "c", "source": "feed-old", "action": "withdraw_source"}
+  ]
+}
